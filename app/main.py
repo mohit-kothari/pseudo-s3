@@ -73,10 +73,13 @@ async def list_objects(bucket_name: Union[str, None], request: Request, response
                        versions: str = DashingQuery("no"), marker: str = DashingQuery(None),
                        continuation_token: str = DashingQuery(None), prefix: str = DashingQuery(None),
                        max_keys: int = DashingQuery(1000), delimiter: str = DashingQuery(None)):
+    bucket = S3Bucket(bucket_name, request.state.aws_region)
+    if not bucket.exists:
+        return AWSResponse.invalid_location(request.state.request_id)
     if list_type == "2":
-        data = S3Bucket(bucket_name, request.state.aws_region).list_objects_v2(encoding_type, prefix, max_keys, continuation_token, delimiter)
+        data = bucket.list_objects_v2(encoding_type, prefix, max_keys, continuation_token, delimiter)
     else:
-        data = S3Bucket(bucket_name, request.state.aws_region).list_objects(encoding_type, prefix, max_keys, marker, delimiter)
+        data = bucket.list_objects(encoding_type, prefix, max_keys, marker, delimiter)
     return AWSResponse.success_response(data)
 
 
@@ -192,7 +195,11 @@ async def read_object(file_path: Union[str, None], request: Request, response: R
         headers['accept-ranges'] = 'bytes'
 
     headers.update(obj.get_metadata())
-    return Response(resp.decode(), media_type="binary/octet-stream", headers=headers, status_code=status_code)
+    try:
+        resp = resp.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+    return Response(resp, media_type="binary/octet-stream", headers=headers, status_code=status_code)
 
 
 @app.post("/{file_path:path}")

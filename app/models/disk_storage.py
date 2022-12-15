@@ -81,7 +81,7 @@ class S3Bucket:
 
     @property
     def is_empty(self):
-        return len([i for i in os.listdir(self.path) if i != ".metadata.json"]) == 0
+        return len([i for i in os.listdir(self.path) if i not in [".metadata.json", ".tmp"]]) == 0
 
     def create(self):
         if not (self.exists or S3Obj.buckets.get(self.name, None)):
@@ -137,6 +137,9 @@ class S3Bucket:
     def delete(self):
         if os.path.exists(self.meta_manager.metafile):
             os.remove(self.meta_manager.metafile)
+        temp_dir = os.path.join(self.path, ".tmp")
+        if os.path.exists(temp_dir):
+            os.rmdir(temp_dir)
         os.rmdir(self.path)
         del S3Obj.buckets[self.name]
         return True
