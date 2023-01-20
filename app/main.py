@@ -46,7 +46,14 @@ async def set_region(request: Request, call_next):
         authorization_headers = dict([i.split("=") for i in authorization.split(", ")])
         request.state.aws_region = authorization_headers["AWS4-HMAC-SHA256 Credential"].split("/")[2]
     else:
-        request.state.aws_region = 'us-west-2'
+        host = request.headers.get("host", "")
+        if "amazonaws.com" in host:
+            if len(host.split(".")) == 5:
+                bucket = host.split(".")[0]
+                request.scope["path"] = "/" + bucket + request.scope["path"]
+            request.state.aws_region = host.split(".")[2]
+        else:
+            request.state.aws_region = 'us-east-1'
     response = await call_next(request)
     response.headers['x-amz-request-id'] = request_id
     return response
@@ -69,7 +76,7 @@ async def list_buckets(request: Request, response: Response):
 
 @app.get("/{bucket_name}")
 async def list_objects(bucket_name: Union[str, None], request: Request, response: Response, 
-                       encoding_type: str = DashingQuery(None), list_type: str = DashingQuery(None), 
+                       encoding_type: str = DashingQuery(None), list_type: str = DashingQuery(None),
                        versions: str = DashingQuery("no"), marker: str = DashingQuery(None),
                        continuation_token: str = DashingQuery(None), prefix: str = DashingQuery(None),
                        max_keys: int = DashingQuery(1000), delimiter: str = DashingQuery(None)):
@@ -123,7 +130,10 @@ async def create_object(file_path: Union[str, None], request: Request, response:
     if uploadId and partNumber:
         etag = obj.create_temp_file(body, uploadId, partNumber)
     else:
-        etag = obj.create_object(body.decode('utf-8'))
+        try:
+            etag = obj.create_object(body.decode('utf-8'))
+        except UnicodeDecodeError:
+            etag = obj.create_object(body)
         metadata = {}
         for key, val in request.headers.items():
             if key.startswith("x-amz-meta"):

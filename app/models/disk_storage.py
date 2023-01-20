@@ -266,7 +266,10 @@ class S3Object:
             raise ValueError("Invalid Bucket")
         if not os.path.exists(os.path.dirname(self.path)):
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w") as fp:
+        mode = "w"
+        if type(data) == bytes:
+            mode = "wb"
+        with open(self.path, mode) as fp:
             fp.write(data)
         return get_etag(data)
 
