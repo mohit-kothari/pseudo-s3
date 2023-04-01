@@ -4,7 +4,7 @@ from pydantic import BaseSettings
 
 class Settings(BaseSettings):
     name = "pseudo-s3"
-    data_root = "./buckets"
+    data_root = os.getenv("BUCKET_PATH", "./buckets")
     date_fmt = "%Y-%m-%dT%H:%M:%S.000Z"
     model = os.getenv("MODEL", "models.disk_storage")
     valid_credentials = [
