@@ -158,11 +158,18 @@ async def create_object(file_path: Union[str, None], request: Request, response:
 @app.head("/{file_path:path}")
 async def head_object(file_path: Union[str, None], request: Request, response: Response):
     bucket, path = S3Object.split_bucket_and_path(file_path)
-    obj = S3Object(path, bucket, request.state.aws_region)
-    if not obj.exists:
-        return AWSResponse.invalid_key(obj.relative_path, request.state.request_id)
-    headers = {'content-length': str(obj.size), "etag": obj.etag, "last-modified": obj.mtime}
-    headers.update(obj.get_metadata())
+    if path:
+        obj = S3Object(path, bucket, request.state.aws_region)
+        if not obj.exists:
+            return AWSResponse.invalid_key(obj.relative_path, request.state.request_id)
+        headers = {'content-length': str(obj.size), "etag": obj.etag, "last-modified": obj.mtime}
+        headers.update(obj.get_metadata())
+    else:
+        bucket = S3Bucket(bucket, request.state.aws_region)
+        if not bucket.exists:
+            return AWSResponse.invalid_key(bucket.name, request.state.request_id) 
+        headers = {}
+        
     return Response("", media_type="binary/octet-stream", headers=headers)
 
 
