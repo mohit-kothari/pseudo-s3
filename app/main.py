@@ -2,9 +2,8 @@
 
 import datetime
 import xmltodict
-import socket
 from typing import Union, Any
-from fastapi import FastAPI, Response, Request, Header, Query, File, UploadFile
+from fastapi import FastAPI, Response, Request, Query, File, Form
 
 from .settings import settings
 
@@ -83,11 +82,16 @@ async def list_objects(bucket_name: Union[str, None], request: Request, response
     bucket = S3Bucket(bucket_name, request.state.aws_region)
     if not bucket.exists:
         return AWSResponse.invalid_location(request.state.request_id)
-    if list_type == "2":
-        data = bucket.list_objects_v2(encoding_type, prefix, max_keys, continuation_token, delimiter)
+    if versions == "no":
+        if list_type == "2":
+            data = bucket.list_objects_v2(encoding_type, prefix, max_keys, continuation_token, delimiter)
+        else:
+            data = bucket.list_objects(encoding_type, prefix, max_keys, marker, delimiter)
+        return AWSResponse.success_response(data)
     else:
-        data = bucket.list_objects(encoding_type, prefix, max_keys, marker, delimiter)
-    return AWSResponse.success_response(data)
+        data = bucket.list_object_versions(encoding_type, prefix, max_keys, marker, delimiter)
+        return AWSResponse.success_response(data)
+    
 
 
 @app.put("/{bucket_name}")
@@ -117,7 +121,7 @@ async def delete_bucket(bucket_name: Union[str, None], request: Request, respons
     if not bucket_object.is_empty:
         return AWSResponse.bucket_not_empty(bucket_name, request.state.request_id)
     if bucket_object.delete():
-        return AWSResponse.delete_successful()
+        return AWSResponse.no_content()
 
 
 @app.put("/{file_path:path}")
@@ -128,8 +132,10 @@ async def create_object(file_path: Union[str, None], request: Request, response:
     if not obj.bucket.exists:
         return AWSResponse.invalid_location(request.state.request_id)
     if uploadId and partNumber:
+        # add part of large file
         etag = obj.create_temp_file(body, uploadId, partNumber)
     else:
+        # create object
         try:
             etag = obj.create_object(body.decode('utf-8'))
         except UnicodeDecodeError:
@@ -175,7 +181,7 @@ async def read_object(file_path: Union[str, None], request: Request, response: R
                 if expiry < datetime.datetime.now(tz=datetime.timezone.utc):
                     return AWSResponse.request_expired(expiry, request.state.request_id)
             else:
-                return AWSResponse.invalid_signature(query_params["AWSAccessKeyId"], secret['secret_key'], query_params["Signature"], request.state.request_id)
+                return AWSResponse.invalid_signature(query_params["AWSAccessKeyId"], string_to_sign, query_params["Signature"], request.state.request_id)
     ###########################################################################
     status_code = 200
     obj = S3Object(path, bucket, aws_region)
@@ -213,13 +219,15 @@ async def read_object(file_path: Union[str, None], request: Request, response: R
 
 
 @app.post("/{file_path:path}")
-async def post(file_path: Union[str, None], request: Request, response: Response, uploadId: str = DashingQuery(None)):
+async def post(file_path: Union[str, None], request: Request, response: Response, uploadId: str = DashingQuery(None), key: str = Form(None), 
+               AWSAccessKeyId = Form(None), signature = Form(None), policy = Form(None), file=File(None)):
     bucket, path = S3Object.split_bucket_and_path(file_path)
     location = '{scheme}://{name}.s3.{host}:{port}{path}'.format(name=bucket, scheme=request.url.scheme, host=request.url.hostname, port=request.url.port, path=file_path)
     bucket = S3Bucket(bucket, request.state.aws_region)
     if not bucket.exists:
         return AWSResponse.invalid_location(request.state.request_id)
     if uploadId:
+        # large file upload finish
         body = await request.body()
         request_data = xmltodict.parse(body)
         obj = S3Object(path, bucket, request.state.aws_region)
@@ -227,6 +235,7 @@ async def post(file_path: Union[str, None], request: Request, response: Response
         bucket.meta_manager.move(uploadId, path)
         return AWSResponse.multipart_upload_result(location, bucket, obj.etag, {"location": location})
     elif request.query_params.__str__() == "delete=":
+        # Delete multiple objects
         body = await request.body()
         request_data = xmltodict.parse(body)
         files_to_delete = [i["Key"] for i in request_data["Delete"]["Object"]]
@@ -234,6 +243,7 @@ async def post(file_path: Union[str, None], request: Request, response: Response
             S3Object(file, bucket, request.state.aws_region).delete_object()
         return AWSResponse.multiple_obj_delete_successful(files_to_delete)
     elif request.query_params.__str__() == "uploads=":
+        # Start large file upload 
         upload_id = get_upload_id()
         metadata = {}
         for key, val in request.headers.items():
@@ -242,6 +252,20 @@ async def post(file_path: Union[str, None], request: Request, response: Response
         if metadata:
             bucket.meta_manager.set(upload_id, metadata)
         return AWSResponse.multipart_upload_start(bucket, path, upload_id, {"location": location})
+    elif file:
+        # handle presigned post url
+        secret = next((i for i in settings.valid_credentials if i["access_key_id"] == AWSAccessKeyId), None)
+        if secret:
+            server_signature = get_signature(policy, secret["secret_key"], url_encoded=False)
+            if signature != server_signature:
+                return AWSResponse.invalid_signature(AWSAccessKeyId, policy, signature, request.state.request_id)
+            obj = S3Object(key, bucket, request.state.aws_region)
+            body = await file.read()
+            try:
+                etag = obj.create_object(body.decode('utf-8'))
+            except UnicodeDecodeError:
+                etag = obj.create_object(body)
+            return AWSResponse.no_content()
 
 
 @app.delete("/{file_path:path}")
@@ -249,7 +273,7 @@ async def delete_object(file_path: Union[str, None], request: Request, response:
     bucket, path = S3Object.split_bucket_and_path(file_path)
     obj = S3Object(path, bucket, request.state.aws_region)
     obj.delete_object()
-    return AWSResponse.delete_successful()
+    return AWSResponse.no_content()
 
 if __name__ == '__main__':
     app.run()

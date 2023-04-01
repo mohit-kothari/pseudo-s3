@@ -117,7 +117,7 @@ def multipart_upload_start(bucket, path, upload_id, headers=None):
     return success_response(response_dict, 200, headers)
 
 
-def delete_successful(headers=None):
+def no_content(headers=None):
     return Response("", status_code=204, headers=headers)
 
 

@@ -170,6 +170,32 @@ class S3Bucket:
             data["ListBucketResult"]["Delimiter"] = delimiter 
         return data
 
+    def list_object_versions(self, encoding_type, prefix=None, max_keys=1000, marker=None, delimiter=None):
+        objects = self.get_obj_list()
+        objects = self._apply_marker(objects, marker)
+        objects = self._check_prefix(objects, prefix)
+        objects, common_prefixes = self._check_delimiter(objects, delimiter, prefix)
+        objects, istruncated = self._apply_max_keys_limit(objects, max_keys)
+
+        data = {
+            "ListVersionsResult": {
+                "Name": self.name,
+                "MaxKeys": max_keys,
+                "EncodingType": encoding_type,
+                "IsTruncated": istruncated,
+                "KeyMarker": marker,
+                "Version": [obj.__dict__(version=True) for obj in objects],
+                "CommonPrefixes": [{"Prefix": x} for x in common_prefixes]
+            }
+        }
+        if istruncated:
+            data["ListBucketResult"]["NextMarker"] = objects[-1].relative_path
+        if prefix:
+            data["ListBucketResult"]["Prefix"] = prefix
+        if delimiter:
+            data["ListBucketResult"]["Delimiter"] = delimiter 
+        return data
+
     def list_objects_v2(self, encoding_type, prefix=None, max_keys=1000, marker=None, delimiter=None):
         objects = self.get_obj_list()
         objects = self._apply_marker(objects, marker)
@@ -204,7 +230,7 @@ class S3Object:
         if os.path.exists(self.path):
             self.exists = True
 
-    def __dict__(self, v2=None):
+    def __dict__(self, v2=None, version=False):
         if self.exists:
             data = {
                 "Key": self.relative_path,
@@ -215,6 +241,9 @@ class S3Object:
             }
             if not v2:
                 data["Owner"] = {"ID": settings.owner_id, "DisplayName": DISPLAY_NAME}
+            if version:
+                data["VersionId"] = "null"
+                data["IsLatest"] = True
             return data
         else:
             return {}

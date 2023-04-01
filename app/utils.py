@@ -31,10 +31,13 @@ def prepare_sign_string(method, file_path, expiry):
     return string_to_sign
 
 
-def get_signature(string_to_sign, secret_key):
+def get_signature(string_to_sign, secret_key, url_encoded=True):
     new_hmac = hmac.new(secret_key.encode('utf-8'), digestmod=hashlib.sha1)
     new_hmac.update(string_to_sign.encode('utf-8'))
-    return urllib.parse.quote(base64.encodebytes(new_hmac.digest()).strip().decode('utf-8')).replace("/", "%2F")
+    signature = base64.encodebytes(new_hmac.digest()).strip().decode('utf-8')
+    if url_encoded:
+        return urllib.parse.quote(signature).replace("/", "%2F")
+    return signature
 
 
 def get_etag(data):
