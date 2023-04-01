@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import base64
 import datetime
+import json
 import xmltodict
 from typing import Union, Any
 from fastapi import FastAPI, Response, Request, Query, File, Form
@@ -9,9 +11,9 @@ from .settings import settings
 
 from . import aws_responses as AWSResponse
 from .utils import (
-    get_etag, get_signature,
+    get_etag, get_signature, get_sha256_signature,
     prepare_sign_string, get_amzn_requestid,
-    get_upload_id
+    get_upload_id, get_secret_key
 )
 
 exec("from .{} import *".format(settings.model))
@@ -41,18 +43,21 @@ async def set_region(request: Request, call_next):
     request_id = get_amzn_requestid()
     request.state.request_id = request_id
     authorization = request.headers.get("Authorization", "")
-    if authorization:
+    host = request.headers.get("host", "")
+    if "amazonaws.com" in host:
+        if len(host.split(".")) == 5:
+            bucket = host.split(".")[0]
+            request.scope["path"] = "/" + bucket + request.scope["path"]
+        request.state.aws_region = host.split(".")[2]
+    if authorization and "AWS4-HMAC-SHA256" in authorization:
         authorization_headers = dict([i.split("=") for i in authorization.split(", ")])
         request.state.aws_region = authorization_headers["AWS4-HMAC-SHA256 Credential"].split("/")[2]
-    else:
-        host = request.headers.get("host", "")
-        if "amazonaws.com" in host:
-            if len(host.split(".")) == 5:
-                bucket = host.split(".")[0]
-                request.scope["path"] = "/" + bucket + request.scope["path"]
-            request.state.aws_region = host.split(".")[2]
-        else:
-            request.state.aws_region = 'us-east-1'
+        if settings.validate_signature:
+            if get_sha256_signature(request, authorization_headers["AWS4-HMAC-SHA256 Credential"]) != authorization_headers["Signature"]:
+                return AWSResponse.invalid_signature("", "", "", request.state.request_id)
+    # else:
+    #     print("!!!!!!!!!!!!!!!!!!!!! not authorization !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1", request.headers)
+    #     request.state.aws_region = 'us-east-1'
     response = await call_next(request)
     response.headers['x-amz-request-id'] = request_id
     return response
@@ -170,13 +175,12 @@ async def read_object(file_path: Union[str, None], request: Request, response: R
     ###########################################################################
     # This is logic to serve pre_signed urls. Needs to be revisited again
     if query_params.get("Expires", None):
-        secret = next((i for i in settings.valid_credentials if i["access_key_id"] == query_params.get("AWSAccessKeyId")), None)
-        if secret:
+        secret_key = get_secret_key(query_params.get("AWSAccessKeyId"))
+        if secret_key:
             string_to_sign = prepare_sign_string("GET", "/"+file_path, query_params["Expires"])
-            server_signature = get_signature(string_to_sign, secret['secret_key'])
             if not aws_region:
                 aws_region = S3Obj.buckets.get(bucket, None)
-            if (query_params.get("Signature", None) == server_signature) and aws_region:
+            if (not settings.validate_signature or (query_params.get("Signature", None) == get_signature(string_to_sign, secret_key))) and aws_region:
                 expiry = datetime.datetime.fromtimestamp(int(query_params["Expires"]), datetime.timezone.utc)
                 if expiry < datetime.datetime.now(tz=datetime.timezone.utc):
                     return AWSResponse.request_expired(expiry, request.state.request_id)
@@ -223,43 +227,53 @@ async def post(file_path: Union[str, None], request: Request, response: Response
                AWSAccessKeyId = Form(None), signature = Form(None), policy = Form(None), file=File(None)):
     bucket, path = S3Object.split_bucket_and_path(file_path)
     location = '{scheme}://{name}.s3.{host}:{port}{path}'.format(name=bucket, scheme=request.url.scheme, host=request.url.hostname, port=request.url.port, path=file_path)
-    bucket = S3Bucket(bucket, request.state.aws_region)
-    if not bucket.exists:
-        return AWSResponse.invalid_location(request.state.request_id)
-    if uploadId:
-        # large file upload finish
-        body = await request.body()
-        request_data = xmltodict.parse(body)
-        obj = S3Object(path, bucket, request.state.aws_region)
-        obj.merge_temp_file(uploadId, request_data["CompleteMultipartUpload"]["Part"])
-        bucket.meta_manager.move(uploadId, path)
-        return AWSResponse.multipart_upload_result(location, bucket, obj.etag, {"location": location})
-    elif request.query_params.__str__() == "delete=":
-        # Delete multiple objects
-        body = await request.body()
-        request_data = xmltodict.parse(body)
-        files_to_delete = [i["Key"] for i in request_data["Delete"]["Object"]]
-        for file in files_to_delete:
-            S3Object(file, bucket, request.state.aws_region).delete_object()
-        return AWSResponse.multiple_obj_delete_successful(files_to_delete)
-    elif request.query_params.__str__() == "uploads=":
-        # Start large file upload 
-        upload_id = get_upload_id()
-        metadata = {}
-        for key, val in request.headers.items():
-            if key.startswith("x-amz-meta"):
-                metadata[key] = val
-        if metadata:
-            bucket.meta_manager.set(upload_id, metadata)
-        return AWSResponse.multipart_upload_start(bucket, path, upload_id, {"location": location})
+    if getattr(request.state, "aws_region", None):
+        bucket = S3Bucket(bucket, request.state.aws_region)
+        if not bucket.exists:
+            return AWSResponse.invalid_location(request.state.request_id)
+        if uploadId:
+            # large file upload finish
+            body = await request.body()
+            request_data = xmltodict.parse(body)
+            obj = S3Object(path, bucket, request.state.aws_region)
+            obj.merge_temp_file(uploadId, request_data["CompleteMultipartUpload"]["Part"])
+            bucket.meta_manager.move(uploadId, path)
+            return AWSResponse.multipart_upload_result(location, bucket, obj.etag, {"location": location})
+        elif request.query_params.__str__() == "delete=":
+            # Delete multiple objects
+            body = await request.body()
+            request_data = xmltodict.parse(body)
+            files_to_delete = [i["Key"] for i in request_data["Delete"]["Object"]]
+            for file in files_to_delete:
+                S3Object(file, bucket, request.state.aws_region).delete_object()
+            return AWSResponse.multiple_obj_delete_successful(files_to_delete)
+        elif request.query_params.__str__() == "uploads=":
+            # Start large file upload 
+            upload_id = get_upload_id()
+            metadata = {}
+            for key, val in request.headers.items():
+                if key.startswith("x-amz-meta"):
+                    metadata[key] = val
+            if metadata:
+                bucket.meta_manager.set(upload_id, metadata)
+            return AWSResponse.multipart_upload_start(bucket, path, upload_id, {"location": location})
     elif file:
         # handle presigned post url
-        secret = next((i for i in settings.valid_credentials if i["access_key_id"] == AWSAccessKeyId), None)
-        if secret:
-            server_signature = get_signature(policy, secret["secret_key"], url_encoded=False)
-            if signature != server_signature:
-                return AWSResponse.invalid_signature(AWSAccessKeyId, policy, signature, request.state.request_id)
-            obj = S3Object(key, bucket, request.state.aws_region)
+        secret_key = get_secret_key(AWSAccessKeyId)
+        if secret_key:
+            if settings.validate_signature:
+                server_signature = get_signature(policy, secret_key, url_encoded=False)
+                if signature != server_signature:
+                    return AWSResponse.invalid_signature(AWSAccessKeyId, policy, signature, request.state.request_id)
+            policy = json.loads(base64.b64decode(policy))
+            expiry = datetime.datetime.strptime(policy["expiration"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            if expiry < datetime.datetime.now(tz=datetime.timezone.utc):
+                return AWSResponse.request_expired(expiry, request.state.request_id)
+            aws_region = S3Obj.buckets.get(bucket, None)
+            bucket = S3Bucket(bucket, aws_region)
+            if not bucket.exists:
+                return AWSResponse.invalid_location(request.state.request_id)
+            obj = S3Object(key, bucket, aws_region)
             body = await file.read()
             try:
                 etag = obj.create_object(body.decode('utf-8'))

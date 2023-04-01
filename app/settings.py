@@ -13,6 +13,7 @@ class Settings(BaseSettings):
             "secret_key": os.getenv("AWS_SECRET_KEY", "pseudoS3SecretKey")
         }
     ]
+    validate_signature = False if os.getenv("VALIDATE_SIGNATURE", "true").lower() == "false" else True
     owner_id = "randomOwnerID"
 
 
